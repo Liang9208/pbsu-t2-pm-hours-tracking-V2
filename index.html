@@ -17,12 +17,14 @@
     @media(max-width:1000px){.summary{grid-template-columns:repeat(3,1fr)}.upload{grid-template-columns:1fr}.drop{min-width:0}}@media(max-width:620px){.shell{padding:16px 12px 60px}.topbar{align-items:flex-start}.privacy{display:none}.summary{grid-template-columns:repeat(2,1fr)}.upload{padding:21px}.card-head{flex-direction:column}.days{grid-template-columns:repeat(7,74px)}}
     .person-link{border:0;background:none;color:var(--blue);padding:0;font:inherit;font-weight:700;text-align:left}.person-link:hover{text-decoration:underline}
     .roster-scroll{overflow:visible;margin-top:8px}.roster-grid{width:100%!important;min-width:0!important;table-layout:fixed!important;font-size:10px!important}.roster-grid th,.roster-grid td{min-width:0!important;padding:4px 2px!important;overflow:hidden}.roster-grid .rowhead{position:static!important;width:54px!important;min-width:54px!important}
+    .sheet-picker{display:none;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-top:14px;box-shadow:var(--shadow)}.sheet-picker .toolbar{justify-content:flex-start}.sheet-picker label{font-weight:700}.sheet-picker select{min-width:280px;max-width:100%}
   </style>
 </head>
 <body>
 <main class="shell">
   <header class="topbar"><div class="brand"><div class="mark">OT</div><div><h1>Roster OT 对比分析器</h1><p>6日 cycle 与 Mon–Sun 周分开分析</p></div></div><div class="privacy">仅在浏览器本地处理文件</div></header>
-  <section class="upload"><div><h2>上传 roster workbook</h2><p>自动寻找 “OT TRACKING”，读取两张表、公式与黄色填色。支持当前工作簿的单 sheet 结构。</p></div><label class="drop" id="drop"><strong>选择或拖入 .xlsx 文件</strong><span id="fileName">文件不会上传到网络</span><input id="file" type="file" accept=".xlsx"></label></section>
+  <section class="upload"><div><h2>上传 roster workbook</h2><p>读取 workbook 内所有 tab；只有你指定的 tab 会进入分析。</p></div><label class="drop" id="drop"><strong>选择或拖入 .xlsx 文件</strong><span id="fileName">文件不会上传到网络</span><input id="file" type="file" accept=".xlsx"></label></section>
+  <section id="sheetPicker" class="sheet-picker"><div class="toolbar"><label for="sheetSelect">选择要分析的 Tab</label><select id="sheetSelect" class="select"></select><button id="analyzeSheet" class="btn primary">分析此 Tab</button></div><p class="footnote">上传时只读取 tab 名称；点击后才读取并分析所选 worksheet，其他 tab 完全不处理。</p></section>
   <div id="status" class="status"></div>
   <section id="results" class="results">
     <div id="summary" class="summary"></div>
@@ -34,7 +36,7 @@
 </main>
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const state={buffer:null,book:null,report:null,diffTeam:'B1',rules:{aWork:12,aYellow:11,a2200:null,a2200Yellow:null,aNS:8,bWork:12,bYellow:11,b2200:null,b2200Yellow:null,firstOT2:4,firstOT2Yellow:3,otherOT2:12,otherOT2Yellow:11}};
+const state={buffer:null,book:null,report:null,sheetIndex:null,diffTeam:'B1',rules:{aWork:12,aYellow:11,a2200:null,a2200Yellow:null,aNS:8,bWork:12,bYellow:11,b2200:null,b2200Yellow:null,firstOT2:4,firstOT2Yellow:3,otherOT2:12,otherOT2Yellow:11}};
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const round1=n=>Math.round((n+Number.EPSILON)*10)/10;
 function setStatus(t,bad=false){$('#status').textContent=t;$('#status').className='status'+(bad?' error':'')}
@@ -64,18 +66,19 @@ function resolve(base,target){if(target.startsWith('/'))return target.slice(1);c
 async function readBook(buffer){
   const z=await unzip(buffer), wb=xml(await z.text('xl/workbook.xml')), rel=xml(await z.text('xl/_rels/workbook.xml.rels'));
   const rels=new Map([...rel.getElementsByTagName('Relationship')].map(x=>[attr(x,'Id'),attr(x,'Target')]));
-  const sharedText=await z.text('xl/sharedStrings.xml'), shared=sharedText?[...xml(sharedText).getElementsByTagName('si')].map(si=>[...si.getElementsByTagName('t')].map(t=>t.textContent).join('')):[];
-  const styleText=await z.text('xl/styles.xml');let fills=[];if(styleText){const sx=xml(styleText), fs=[...sx.getElementsByTagName('fills')[0]?.children||[]], xfs=[...sx.getElementsByTagName('cellXfs')[0]?.children||[]];fills=xfs.map(x=>{const id=Number(attr(x,'fillId')||0), f=fs[id], fg=f?.getElementsByTagName('fgColor')[0];return (attr(fg,'rgb')||attr(fg,'indexed')||attr(fg,'theme')||'').toUpperCase()})}
-  const sheets=[];
-  for(const s of [...wb.getElementsByTagName('sheet')]){
-    const target=rels.get(attr(s,'r:id')), path=resolve('xl/workbook.xml',target), doc=xml(await z.text(path)), cells=new Map(), formulas=new Map();let maxRow=0,maxCol=0;
-    for(const c of [...doc.getElementsByTagName('c')]){const ref=attr(c,'r'), row=Number(ref.match(/\d+/)?.[0]), col=colNum(ref), type=attr(c,'t'), si=Number(attr(c,'s')||0), vn=c.getElementsByTagName('v')[0]?.textContent, fn=c.getElementsByTagName('f')[0]?.textContent;let val=vn;
-      if(type==='s')val=shared[Number(vn)]??'';else if(type==='inlineStr')val=[...c.getElementsByTagName('t')].map(t=>t.textContent).join('');else if(type==='str')val=vn??'';else if(vn!==undefined&&vn!==null&&vn!=='')val=Number(vn);
-      cells.set(`${row},${col}`,{v:val,fill:fills[si]||'',ref,formula:fn||null});if(fn)formulas.set(ref,fn);maxRow=Math.max(maxRow,row);maxCol=Math.max(maxCol,col)
-    }
-    sheets.push({name:attr(s,'name'),cells,formulas,maxRow,maxCol,path});
+  const sheets=[...wb.getElementsByTagName('sheet')].map(s=>({name:attr(s,'name'),path:resolve('xl/workbook.xml',rels.get(attr(s,'r:id'))),cells:null,formulas:null,maxRow:0,maxCol:0}));
+  return {sheets,z,shared:null,fills:null};
+}
+async function loadSheet(book,index){
+  const sh=book.sheets[index];if(!sh)throw Error('找不到选择的 worksheet');if(sh.cells)return sh;
+  if(!book.shared){const sharedText=await book.z.text('xl/sharedStrings.xml');book.shared=sharedText?[...xml(sharedText).getElementsByTagName('si')].map(si=>[...si.getElementsByTagName('t')].map(t=>t.textContent).join('')):[]}
+  if(!book.fills){const styleText=await book.z.text('xl/styles.xml');book.fills=[];if(styleText){const sx=xml(styleText),fs=[...sx.getElementsByTagName('fills')[0]?.children||[]],xfs=[...sx.getElementsByTagName('cellXfs')[0]?.children||[]];book.fills=xfs.map(x=>{const id=Number(attr(x,'fillId')||0),f=fs[id],fg=f?.getElementsByTagName('fgColor')[0];return (attr(fg,'rgb')||attr(fg,'indexed')||attr(fg,'theme')||'').toUpperCase()})}}
+  const source=await book.z.text(sh.path);if(!source)throw Error('无法读取选择的 worksheet');const doc=xml(source),cells=new Map(),formulas=new Map();let maxRow=0,maxCol=0;
+  for(const c of [...doc.getElementsByTagName('c')]){const ref=attr(c,'r'),row=Number(ref.match(/\d+/)?.[0]),col=colNum(ref),type=attr(c,'t'),si=Number(attr(c,'s')||0),vn=c.getElementsByTagName('v')[0]?.textContent,fn=c.getElementsByTagName('f')[0]?.textContent;let val=vn;
+    if(type==='s')val=book.shared[Number(vn)]??'';else if(type==='inlineStr')val=[...c.getElementsByTagName('t')].map(t=>t.textContent).join('');else if(type==='str')val=vn??'';else if(vn!==undefined&&vn!==null&&vn!=='')val=Number(vn);
+    cells.set(`${row},${col}`,{v:val,fill:book.fills[si]||'',ref,formula:fn||null});if(fn)formulas.set(ref,fn);maxRow=Math.max(maxRow,row);maxCol=Math.max(maxCol,col)
   }
-  return {sheets};
+  Object.assign(sh,{cells,formulas,maxRow,maxCol});return sh;
 }
 function cell(sh,r,c){return sh.cells.get(`${r},${c}`)||{v:null,fill:'',ref:`${colLetters(c)}${r}`,formula:null}}
 function text(sh,r,c){return String(cell(sh,r,c).v??'').trim()}
@@ -95,8 +98,8 @@ function numberOrText(v){return typeof v==='number'?v:(v==null?null:String(v).tr
 function matches(exp,actual){if(exp==null)return null;if(typeof actual==='string')return exp===0;return typeof actual==='number'&&Math.abs(exp-actual)<.001}
 function nameKey(v){return String(v||'').replace(/\s*\([^)]*\)\s*$/,'').replace(/\s+/g,' ').trim().toUpperCase()}
 
-function buildReport(book){
-  const sh=book.sheets[0], hs=findHeaders(sh);if(hs.length<2)throw Error('找不到上下两个 ID / NAME / TEAM header');const [rh,oh]=hs;let marker=oh-1;for(let r=rh+1;r<oh;r++)if(text(sh,r,2).toUpperCase().includes('OT TRACKING'))marker=r;
+function buildReport(book,sheetIndex=state.sheetIndex??0){
+  const sh=book.sheets[sheetIndex];if(!sh)throw Error('找不到选择的 worksheet');const hs=findHeaders(sh);if(hs.length<2)throw Error('此 tab 找不到上下两个 ID / NAME / TEAM header');const [rh,oh]=hs;let marker=oh-1;for(let r=rh+1;r<oh;r++)if(text(sh,r,2).toUpperCase().includes('OT TRACKING'))marker=r;
   const rc=analyzeColumns(sh,rh), oc=analyzeColumns(sh,oh), weeks=groupWeeks(sh,rh,rc.day), rosterRows=findRows(sh,rh+1,marker), otRows=findRows(sh,oh+1,sh.maxRow+1), otById=new Map(otRows.map(r=>[String(cell(sh,r,1).v),r])),otByName=new Map(),usedOt=new Set();for(const r of otRows){const k=nameKey(text(sh,r,2));if(!otByName.has(k))otByName.set(k,[]);otByName.get(k).push(r)}
   const months=new Map();for(const w of weeks)for(const d of w.dates)months.set(monthKey(d),(months.get(monthKey(d))||0)+1);const reportMonth=[...months].sort((a,b)=>b[1]-a[1])[0]?.[0];
   const officers=[], mismatches=[], identity=[], formulaIssues=[];
@@ -140,8 +143,9 @@ function renderPattern(){const a=state.report.patterns;$('#pattern').innerHTML=`
 function renderFormula(){const r=state.report, key=r.formulaCells.filter(x=>/AJ|AK|AL|AM|AN|AO|AP/.test(x.ref)).slice(0,120);$('#formula').innerHTML=`<div class="card"><div class="card-head"><div><h2>Workbook formula 检查</h2><p>公式用于理解旧表口径，但 expected 仍按规则设置计算</p></div></div><div class="card-body"><div class="callout warn"><b>需要注意：</b> Scheme A 月度总工时与周OT使用不同日期边界是合理的；月度范围只含报告月，周OT必须保留完整 Mon–Sun。月底若缺少 Thu–Sun，不能凭空推算。</div>${r.formulaIssues.map(x=>`<div class="callout bad">${esc(x)}</div>`).join('')}<div class="table-wrap"><table><thead><tr><th>Cell</th><th>Formula</th></tr></thead><tbody>${key.map(x=>`<tr><td class="mono">${esc(x.ref)}</td><td><div class="formula">=${esc(x.f)}</div></td></tr>`).join('')}</tbody></table></div></div></div>`}
 function renderRules(){const R=state.rules, fields=[['aWork','Scheme A：2 / GS 等'],['aYellow','Scheme A：黄色'],['a2200','Scheme A：2200（未确认）'],['a2200Yellow','Scheme A：2200 黄色（未确认）'],['aNS','Scheme A：NS absence'],['bWork','Scheme B：2 / GS 等'],['bYellow','Scheme B：黄色'],['b2200','Scheme B：2200（未确认）'],['b2200Yellow','Scheme B：2200 黄色（未确认）'],['firstOT2','OT2：第一个 off'],['firstOT2Yellow','OT2：第一个 off 黄色'],['otherOT2','OT2：其他 off'],['otherOT2Yellow','OT2：其他 off 黄色']];$('#rules').innerHTML=`<div class="card"><div class="card-head"><div><h2>规则设置</h2><p>空白表示规则未确认，不会静默计为0。代码1和6也保留为待确认。</p></div><button class="btn primary" id="rerun">重新分析</button></div><div class="card-body"><div class="rules">${fields.map(([k,l])=>`<div class="rule"><label>${esc(l)}<input type="number" step="0.1" data-rule="${k}" value="${R[k]??''}"></label></div>`).join('')}</div></div></div>`;$('#rerun').onclick=()=>{$$('[data-rule]').forEach(x=>state.rules[x.dataset.rule]=x.value.trim()===''?null:Number(x.value));state.report=buildReport(state.book);render();setStatus('已使用更新后的规则重新分析。')}}
 function exportCsv(){const rows=[['Category','ID','Name','Team','Scheme','Date / field','Expected / top','Actual / bottom','Reference']];for(const d of state.report.mismatches)rows.push(['Hour mismatch',d.o.id,d.o.name,d.o.team,d.o.scheme,displayDate(d.date),d.expected,d.actual,`${colLetters(d.col)}${d.o.rr} → ${colLetters(d.col)}${d.o.or}`]);for(const o of state.report.caps)rows.push(['72-hour cap',o.id,o.name,o.team,o.scheme,'Total OT','72',o.actualOT,'']);for(const x of state.report.identity)rows.push(['Identity',x.o.id,x.o.name,x.o.team,x.o.scheme||'',x.type,x.top,x.bottom,`${x.o.rr} → ${x.o.or??'—'}`]);for(const x of state.report.patterns)rows.push(['Potential roster deviation',x.o.id,x.o.name,x.o.team,x.o.scheme,displayDate(x.date),x.consensus,x.own,`${colLetters(x.col)}${x.o.rr}`]);const csv='\ufeff'+rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\r\n'),a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='roster-ot-comparison.csv';a.click();URL.revokeObjectURL(a.href)}
-async function handleFile(f){if(!f)return;$('#fileName').textContent=f.name;setStatus('正在读取 workbook…');try{state.buffer=await f.arrayBuffer();state.book=await readBook(state.buffer);setStatus('正在分析6日 cycle、完整 Mon–Sun 与两个 table…');state.report=buildReport(state.book);render();setStatus(`完成：${state.report.officers.length} 名 officer，${state.report.mismatches.length} 个逐日差异。`)}catch(e){console.error(e);setStatus(e.message||String(e),true)}}
-$('#file').onchange=e=>handleFile(e.target.files[0]);const drop=$('#drop');['dragenter','dragover'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>handleFile(e.dataTransfer.files[0]));$$('.tab').forEach(t=>t.onclick=()=>{$$('.tab').forEach(x=>x.classList.toggle('active',x===t));$$('.panel').forEach(p=>p.classList.toggle('active',p.id===t.dataset.tab))});
+async function handleFile(f){if(!f)return;$('#fileName').textContent=f.name;$('#results').style.display='none';$('#sheetPicker').style.display='none';setStatus('正在读取 workbook 的 tab 名称…');try{state.buffer=await f.arrayBuffer();state.book=await readBook(state.buffer);state.report=null;state.sheetIndex=null;$('#sheetSelect').innerHTML=state.book.sheets.map((s,i)=>`<option value="${i}">${esc(s.name)}</option>`).join('');$('#sheetPicker').style.display='block';setStatus(`已读取 ${state.book.sheets.length} 个 tab。请选择一个 tab 后点击“分析此 Tab”；其他 tab 不会被读取或分析。`)}catch(e){console.error(e);setStatus(e.message||String(e),true)}}
+async function analyzeSelected(){if(!state.book)return;const index=Number($('#sheetSelect').value),name=state.book.sheets[index]?.name||'';setStatus(`正在读取并分析 tab：${name}…`);$('#analyzeSheet').disabled=true;try{state.sheetIndex=index;await loadSheet(state.book,index);state.report=buildReport(state.book,index);render();setStatus(`完成：${name} · ${state.report.officers.length} 名 officer，${state.report.mismatches.length} 个逐日差异。`)}catch(e){console.error(e);$('#results').style.display='none';setStatus(`${name}：${e.message||String(e)}`,true)}finally{$('#analyzeSheet').disabled=false}}
+$('#analyzeSheet').onclick=analyzeSelected;$('#file').onchange=e=>handleFile(e.target.files[0]);const drop=$('#drop');['dragenter','dragover'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>handleFile(e.dataTransfer.files[0]));$$('.tab').forEach(t=>t.onclick=()=>{$$('.tab').forEach(x=>x.classList.toggle('active',x===t));$$('.panel').forEach(p=>p.classList.toggle('active',p.id===t.dataset.tab))});
 </script>
 </body>
 </html>
